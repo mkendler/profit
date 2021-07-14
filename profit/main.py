@@ -72,9 +72,6 @@ def main():
             from profit.fit import ActiveLearning
             from profit.sur.sur import Surrogate
             runner.fill(variables.named_input)
-            if 'active_learning' not in config:
-                config['active_learning'] = {}
-            ActiveLearning.handle_config(config['active_learning'], config)
             al = ActiveLearning.from_config(runner, config['active_learning'], config)
             try:
                 al.run_first()

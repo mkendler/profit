@@ -68,7 +68,12 @@ class AbstractConfig(ABC):
             elif hasattr(self, name):
                 self.__setattr__(name, value)
             else:
-                raise AttributeError("Config parameter {} is not available.".format(name))
+                message = "Config parameter '{}' for {} configuration may be unused.".format(name, self.__class__.__name__)
+                warnings.warn(message)
+                setattr(self, name, value)
+
+    def process_entries(self, base_config):
+        pass
 
     def as_dict(self):
         return {name: getattr(self, name)
@@ -78,6 +83,28 @@ class AbstractConfig(ABC):
     def set_defaults(self, default_dict):
         for name, value in default_dict.items():
             setattr(self, name, value)
+
+    def create_subconfigs(self, **entries):
+        entries_lower = {key.lower(): entry for key, entry in entries.items()}
+        for name, sub_config in self._sub_configs.items():
+            sub_config_label = name.lower()
+            if name.lower() in entries_lower:
+                entry = entries_lower[name.lower()]
+                if isinstance(entry, str):
+                    entry = {'class': entry}
+                sub = sub_config(**entry)
+                self.__setattr__(sub_config_label, sub)
+            else:
+                self.__setattr__(sub_config_label, sub_config())
+
+    @classmethod
+    def register(cls, label):
+        def decorator(config):
+            if label in cls._sub_configs:
+                raise KeyError(f'registering duplicate label {label} for Interface')
+            cls._sub_configs[label] = config
+            return config
+        return decorator
 
 
 class BaseConfig(AbstractConfig):
@@ -126,17 +153,8 @@ class BaseConfig(AbstractConfig):
         self.independent = {}
         self.files = defaults.files
 
-        # Create sub configs
-        entries_lower = {key.lower(): entry for key, entry in entries.items()}
-        for name, sub_config in self._sub_configs.items():
-            sub_config_label = name.lower()
-            if name.lower() in entries_lower:
-                sub = sub_config(**entries_lower[name.lower()])
-                self.__setattr__(sub_config_label, sub)
-            else:
-                self.__setattr__(sub_config_label, sub_config())
-
         self.update(**entries)  # Update the attributes with given entries.
+        self.create_subconfigs(**entries)
         self.process_entries()  # Postprocess the attributes to standardize different user entries.
 
     def process_entries(self):
@@ -187,15 +205,6 @@ class BaseConfig(AbstractConfig):
         self.config_path = path.join(self.base_dir, filename)
         return self
 
-    @classmethod
-    def register(cls, label):
-        def decorator(config):
-            if label in cls._sub_configs:
-                raise KeyError(f'registering duplicate label {label} for Interface')
-            cls._sub_configs[label] = config
-            return config
-        return decorator
-
 
 @BaseConfig.register("Run")
 class RunConfig(AbstractConfig):
@@ -224,13 +233,28 @@ class FitConfig(AbstractConfig):
         self.update(**entries)
 
     def process_entries(self, base_config):
-        from profit.sur import Surrogate
+        for mode_str in ('save', 'load'):
+            mode = getattr(self, mode_str)
+            if mode:
+                setattr(self, mode, path.abspath(path.join(base_config.base_dir, mode)))
+                if self.surrogate not in mode:
+                    filepath = mode.rsplit('.', 1)
+                    setattr(self, mode_str, ''.join(filepath[:-1]) + f'_{self.surrogate}.' + filepath[-1])
+
         if self.load:
-            self.load = path.join(base_config.base_dir, self.load)
-        if self.save:
-            self.save = path.join(base_config.base_dir, self.save)
-        sub = Surrogate.handle_config(self.as_dict(), base_config.as_dict())
-        self.update(**sub)
+            setattr(self, 'save', False)
+
+        for enc in getattr(self, 'encoder'):
+            cols = enc[1]
+            out = enc[2]
+            if isinstance(cols, str):
+                variables = getattr(base_config, 'output' if out else 'input')
+                if cols.lower() == 'all':
+                    enc[1] = list(range(len(variables)))
+                elif cols.lower() in [v['kind'] for v in variables.values()]:
+                    enc[1] = [idx for idx, v in enumerate(variables.values()) if v['kind'].lower() == cols.lower()]
+                else:
+                    enc[1] = []
 
 
 @BaseConfig.register("Active_Learning")
@@ -241,9 +265,7 @@ class ALConfig(AbstractConfig):
         self.update(**entries)
 
     def process_entries(self, base_config):
-        from profit.fit import ActiveLearning
-        sub = ActiveLearning.handle_config(self.as_dict(), base_config.as_dict)
-        self.update(**sub)
+        pass
 
 
 @BaseConfig.register("UI")
