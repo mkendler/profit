@@ -3,6 +3,7 @@ import yaml
 from collections import OrderedDict
 from profit import defaults
 from abc import ABC
+import warnings
 
 VALID_FORMATS = ('.yaml', '.py')
 
@@ -63,10 +64,8 @@ class AbstractConfig(ABC):
 
     def update(self, **entries):
         for name, value in entries.items():
-            if name.lower() in (name.lower() for name in self._sub_configs):
-                pass
-            elif hasattr(self, name):
-                self.__setattr__(name, value)
+            if hasattr(self, name) or name in map(str.lower, self._sub_configs):
+                setattr(self, name, value)
             else:
                 message = "Config parameter '{}' for {} configuration may be unused.".format(name, self.__class__.__name__)
                 warnings.warn(message)
@@ -206,20 +205,181 @@ class BaseConfig(AbstractConfig):
         return self
 
 
-@BaseConfig.register("Run")
+@BaseConfig.register("run")
 class RunConfig(AbstractConfig):
+    _sub_configs = {}
 
     def __init__(self, **entries):
         self.set_defaults(defaults.run)
         self.update(**entries)
 
+        for key, sub_config in self._sub_configs.items():
+            attr = getattr(self, key.lower())
+            if isinstance(attr, str):
+                attr = {'class': attr}
+            try:
+                setattr(self, key.lower(), sub_config._sub_configs[attr['class']](**attr))
+            except KeyError:
+                setattr(self, key.lower(), sub_config._sub_configs['custom'](**attr))
+
     def process_entries(self, base_config):
-        from profit.run import Runner
-        sub = Runner.handle_run_config(base_config.as_dict(), self.as_dict())
-        self.update(**sub)
+        from profit.util import load_includes
+
+        if isinstance(self.include, str):
+            setattr(self, 'include', [self.include])
+
+        for p, include_path in enumerate(self.include):
+            if not path.isabs(include_path):
+                self.include[p] = path.abspath(path.join(base_config.base_dir, include_path))
+        load_includes(self.include)
+
+        if not path.isabs(self.log_path):
+            setattr(self, 'log_path', path.abspath(path.join(base_config.base_dir, self.log_path)))
+
+        for key in self._sub_configs:
+            getattr(self, key.lower()).process_entries(base_config)
 
 
-@BaseConfig.register("Fit")
+@RunConfig.register("runner")
+class RunnerConfig(AbstractConfig):
+    _sub_configs = {}
+
+    def __init__(self, **entries):
+        pass
+
+
+@RunnerConfig.register("local")
+class LocalRunnerConfig(AbstractConfig):
+
+    def __init__(self, **entries):
+        self.set_defaults(getattr(defaults, "run" + "_runner_" + "local"))
+        self.update(**entries)
+
+
+@RunnerConfig.register("slurm")
+class SlurmRunnerConfig(AbstractConfig):
+
+    def __init__(self, **entries):
+        self.set_defaults(getattr(defaults, "run" + "_runner_" + "slurm"))
+        self.update(**entries)
+
+    def process_entries(self, base_config):
+        # convert path to absolute path
+        if not path.isabs(self.path):
+            setattr(self, 'path', path.abspath(path.join(base_config.base_dir, self.path)))
+        # check type of 'cpus'
+        if (type(self.cpus) is not int or self.cpus < 1) and self.cpus != 'all':
+            raise ValueError(f'config option "cpus" may only be a positive integer or "all" and not {self.cpus}')
+
+
+@RunConfig.register("interface")
+class InterfaceConfig(AbstractConfig):
+    _sub_configs = {}
+
+    def __init__(self):
+        pass
+
+
+@InterfaceConfig.register("memmap")
+class MemmapInterfaceConfig(AbstractConfig):
+
+    def __init__(self, **entries):
+        self.set_defaults(getattr(defaults, "run" + "_interface_" + "memmap"))
+        self.update(**entries)
+
+    def process_entries(self, base_config):
+        # 'path' is relative to base_dir, convert to absolute path
+        if not path.isabs(self.path):
+            setattr(self, 'path', path.abspath(path.join(base_config.base_dir, self.path)))
+
+
+@InterfaceConfig.register("zeromq")
+class ZeroMQInterfaceConfig(AbstractConfig):
+
+    def __init__(self, **entries):
+        self.set_defaults(getattr(defaults, "run" + "_interface_" + "zeromq"))
+        self.update(**entries)
+
+
+@RunConfig.register("pre")
+class PreConfig(AbstractConfig):
+    _sub_configs = {}
+
+    def __init__(self, **entries):
+        pass
+
+
+@PreConfig.register("template")
+class TemplatePreConfig(AbstractConfig):
+    def __init__(self, **entries):
+        self.set_defaults(getattr(defaults, "run" + "_pre_" + "template"))
+        self.update(**entries)
+
+    def process_entries(self, base_config):
+        # 'path' is relative to base_dir, convert to absolute path
+        if not path.isabs(self.path):
+            setattr(self, 'path', path.abspath(path.join(base_config.base_dir, self.path)))
+
+        if isinstance(self.param_files, str):
+            setattr(self, 'param_files', [self.param_files])
+
+
+@RunConfig.register("post")
+class PostConfig(AbstractConfig):
+    _sub_configs = {}
+
+    def __init__(self, **entries):
+        pass
+
+
+@PostConfig.register("json")
+class JsonPostConfig(AbstractConfig):
+
+    def __init__(self, **entries):
+        self.set_defaults(getattr(defaults, "run" + "_post_" + "json"))
+        self.update(**entries)
+
+    def process_entries(self, base_config):
+        pass
+
+
+@PostConfig.register("numpytxt")
+class NumpytxtPostConfig(AbstractConfig):
+
+    def __init__(self, **entries):
+        self.set_defaults(getattr(defaults, "run" + "_post_" + "numpytxt"))
+        self.update(**entries)
+
+    def process_entries(self, base_config):
+        if isinstance(self.names, str):
+            setattr(self, 'names', list(base_config.output.keys()) if self.names == 'all' else self.names.split())
+
+
+@PostConfig.register("hdf5")
+class HDF5PostConfig(AbstractConfig):
+
+    def __init__(self, **entries):
+        self.set_defaults(getattr(defaults, "run" + "_post_" + "hdf5"))
+        self.update(**entries)
+
+    def process_entries(self, base_config):
+        pass
+
+
+@RunnerConfig.register("custom")
+@InterfaceConfig.register("custom")
+@PreConfig.register("custom")
+@PostConfig.register("custom")
+class CustomConfig(AbstractConfig):
+
+    def __init__(self, **entries):
+        self.update(**entries)
+
+    def process_entries(self, base_config):
+        pass
+
+
+@BaseConfig.register("fit")
 class FitConfig(AbstractConfig):
 
     def __init__(self, **entries):
@@ -257,7 +417,7 @@ class FitConfig(AbstractConfig):
                     enc[1] = []
 
 
-@BaseConfig.register("Active_Learning")
+@BaseConfig.register("active_learning")
 class ALConfig(AbstractConfig):
 
     def __init__(self, **entries):
@@ -268,7 +428,7 @@ class ALConfig(AbstractConfig):
         pass
 
 
-@BaseConfig.register("UI")
+@BaseConfig.register("ui")
 class UIConfig(AbstractConfig):
 
     def __init__(self, **entries):
